@@ -70,6 +70,89 @@ bot.onText(/\/about/, async (msg) => {
   }
 });
 
+bot.onText(/\/price (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  console.log(match)
+  const mintAddress = match[1].trim();
+console.log("Mint Address:", mintAddress);
+  try {
+    const tokenRes = await fetch(`https://lite-api.jup.ag/tokens/v1/token/${mintAddress}`);
+    const tokenInfo = await tokenRes.json();
+console.log("Token Info:", tokenInfo);
+    const priceRes = await fetch(`https://lite-api.jup.ag/price/v2?ids=${mintAddress}`);
+    const priceJson = await priceRes.json();
+    console.log("Price Data:", priceJson);
+const priceData = priceJson.data[mintAddress]; // ✅ use bracket notation
+
+   const price = parseFloat(priceData?.price ?? "0");
+// const change = parseFloat(priceData?.priceChange?.percent24h ?? "0");
+
+console.log("Change:", price);
+    if (!price ) {
+      return bot.sendMessage(chatId, "❌ Could not retrieve a valid price.");
+    }
+
+    const msgText = `💰 *${tokenInfo.name}* (${tokenInfo.symbol})\n\n📈 Price: $${price.toFixed(6)}`;
+
+    await bot.sendPhoto(chatId, tokenInfo.logoURI, {
+      caption: msgText,
+      parse_mode: "Markdown"
+    });
+
+  } catch (err) {
+    console.error("Error fetching price/token info:", err.message);
+    bot.sendMessage(chatId, "⚠️ Failed to fetch data. Double-check the mint address.");
+  }
+});
+
+
+bot.onText(/\/tokens/, async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    const response = await axios.get('https://lite-api.jup.ag/tokens/v1/mints/tradable');
+    const tokenMints = response.data.slice(0, 5); // limit to first 5 for now
+
+    const inlineKeyboard = tokenMints.map((mint) => [{
+      text: mint.slice(0, 6) + '...', // first 6 chars
+      callback_data: `token_${mint}`
+    }]);
+
+    bot.sendMessage(chatId, 'Select a token to view details:', {
+      reply_markup: {
+        inline_keyboard: inlineKeyboard
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    bot.sendMessage(chatId, '❌ Failed to fetch token list.');
+  }
+});
+
+// Handle button clicks
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const mint = query.data.replace('token_', '');
+
+  try {
+    const [tokenResponse, priceResponse] = await Promise.all([
+      axios.get(`https://lite-api.jup.ag/tokens/v1/token/${mint}`),
+      axios.get(`https://lite-api.jup.ag/price/v2?ids=${mint}`)
+    ]);
+
+    const token = tokenResponse.data;
+    const price = priceResponse.data[mint]?.price ?? 0;
+
+    const caption = `💠 *${token.name} (${token.symbol})*\n\n💵 *Price*: $${price.toFixed(4)}\n📦 Volume (24h): $${Math.floor(token.daily_volume).toLocaleString()}`;
+    bot.sendPhoto(chatId, token.logoURI, {
+      caption,
+      parse_mode: 'Markdown'
+    });
+  } catch (e) {
+    console.error(e);
+    bot.sendMessage(chatId, '❌ Failed to fetch token details.');
+  }
+});
+
 // Echo any text message
 bot.on('message', (msg) => {
   const chatId = msg.chat.id;
