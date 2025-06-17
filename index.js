@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import express from 'express';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
+import axios from 'axios';
 
 const app = express();
 const dappKeyPair = nacl.box.keyPair();
@@ -10,6 +11,7 @@ const dappPublicKey = bs58.encode(dappKeyPair.publicKey); // used in connect URL
 dotenv.config();
 const port = process.env.PORT ;
 const token = process.env.TELEGRAM_BOT_TOKEN;
+const userWalletMap = new Map(); // chat_id → walletAddress
 
 // Create bot (polling means it will keep checking for new messages)
 const bot = new TelegramBot(token, { polling: true });
@@ -42,6 +44,31 @@ bot.onText(/\/connect/, (msg) => {
   });
 });
 
+bot.onText(/\/about/, async (msg) => {
+  const chatId = String(msg.chat.id);
+
+  const wallet = userWalletMap.get(chatId);
+  if (!wallet) {
+    return bot.sendMessage(chatId, "❌ You haven't connected your wallet yet. Use /connect first.");
+  }
+
+  try {
+    const response = await axios.get(`https://lite-api.jup.ag/ultra/v1/balances/${wallet}`);
+    const data = response.data;
+
+    if (data.error) {
+      return bot.sendMessage(chatId, `❌ Error: ${data.error}`);
+    }
+
+    const sol = data.SOL?.uiAmount ?? 0;
+    const isFrozen = data.SOL?.isFrozen ? "Yes" : "No";
+
+    bot.sendMessage(chatId, `💰 Your SOL Balance:\n\nBalance: ${sol} SOL\nFrozen: ${isFrozen}`);
+  } catch (error) {
+    console.error("Error fetching balance:", error);
+    bot.sendMessage(chatId, "⚠️ Failed to fetch balance. Please try again later.");
+  }
+});
 
 // Echo any text message
 bot.on('message', (msg) => {
@@ -79,6 +106,7 @@ app.get('/phantom/callback', async (req, res) => {
 
     const json = JSON.parse(Buffer.from(decryptedData).toString());
     const wallet = json.public_key;
+userWalletMap.set(String(chat_id), wallet); // Save wallet for this Telegram user
 
     bot.sendMessage(chat_id, `✅ Wallet connected: \n${wallet}`);
 
@@ -87,6 +115,10 @@ app.get('/phantom/callback', async (req, res) => {
         <body>
           <h2>✅ Wallet Connected</h2>
           <p>You can go back to Telegram.</p>
+          <a href="tg://resolve?domain=jupidaddy_bot">
+  👉 Return to Telegram
+</a>
+
         </body>
       </html>
     `);
