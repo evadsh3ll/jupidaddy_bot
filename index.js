@@ -289,6 +289,7 @@ Gasless: *${gasless ? "Yes" : "No"}*
 
 
 
+
 bot.onText(/\/notify (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const input = match[1].trim().split(" ");
@@ -308,9 +309,20 @@ bot.onText(/\/notify (.+)/, async (msg, match) => {
         const tokenRes = await fetch(`https://lite-api.jup.ag/tokens/v1/token/${mintAddress}`);
         const tokenInfo = await tokenRes.json();
 
-        bot.sendMessage(chatId, `🔔 Monitoring *${tokenInfo.symbol}* — will notify when price goes *${condition}* $${targetPrice}`, {
-            parse_mode: "Markdown"
-        });
+        const priceRes = await fetch(`https://lite-api.jup.ag/price/v2?ids=${mintAddress}`);
+        const priceJson = await priceRes.json();
+        const currentPrice = parseFloat(priceJson.data[mintAddress]?.price ?? "0");
+
+        if (!currentPrice) {
+            return bot.sendMessage(chatId, "❌ Couldn't fetch valid token price.");
+        }
+
+        await bot.sendMessage(chatId,
+            `📊 *${tokenInfo.name}* (${tokenInfo.symbol})\n` +
+            `💵 Current Price: $${currentPrice.toFixed(6)}\n\n` +
+            `🔔 Monitoring for price *${condition}* $${targetPrice}`,
+            { parse_mode: "Markdown" }
+        );
 
         if (!notifyWatchers[chatId]) notifyWatchers[chatId] = [];
 
@@ -319,7 +331,9 @@ bot.onText(/\/notify (.+)/, async (msg, match) => {
                 const res = await fetch(`https://lite-api.jup.ag/price/v2?ids=${mintAddress}`);
                 const json = await res.json();
                 const priceNow = parseFloat(json.data[mintAddress]?.price ?? "0");
-console.log(`Current price for ${tokenInfo.symbol}: $${priceNow}`);
+
+                console.log(`Current price for ${tokenInfo.symbol}: $${priceNow}`);
+
                 const shouldNotify =
                     (condition === "above" && priceNow >= targetPrice) ||
                     (condition === "below" && priceNow <= targetPrice);
@@ -342,6 +356,7 @@ console.log(`Current price for ${tokenInfo.symbol}: $${priceNow}`);
         bot.sendMessage(chatId, "⚠️ Failed to fetch token info. Please check the mint address.");
     }
 });
+
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const mint = query.data.replace('token_', '');
