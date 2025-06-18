@@ -229,63 +229,76 @@ bot.onText(/\/route (.+)/, async (msg, match) => {
     const input = match[1]?.trim()?.split(" ");
 
     if (!wallet) {
-        bot.sendMessage(chatId, "❌ Wallet not connected. Use /connect first.");
-        return;
+        return bot.sendMessage(chatId, "❌ Wallet not connected. Use /connect first.");
     }
 
     if (!input || input.length !== 3) {
-        bot.sendMessage(chatId, "❌ Usage:\n/route <inputMint> <outputMint> <amountInLamports>");
-        return;
+        return bot.sendMessage(chatId, "❌ Usage:\n/route <inputMint> <outputMint> <amountInLamports>");
     }
-    console.log("Route input:", wallet);
+
     const [inputMint, outputMint, amount] = input;
 
-    try {
-        const url = `https://lite-api.jup.ag/ultra/v1/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&taker=${wallet}`;
+    async function fetchRoute(taker) {
+        const baseUrl = `https://lite-api.jup.ag/ultra/v1/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`;
+        const url = taker ? `${baseUrl}&taker=${taker}` : baseUrl;
         const response = await fetch(url);
-        const data = await response.json();
-        console.log("Route response:", data.routePlan);
-        console.log("Route response:", data);
-        if (data.error) {
-            bot.sendMessage(chatId, `❌ API Error: ${data.error}`);
-            return;
-        }
+        return response.json();
+    }
 
-        const {
-            swapType,
-            requestId,
-            inAmount,
-            outAmount,
-            slippageBps,
-            priceImpactPct,
-            routePlan,
-            gasless,
-        } = data;
+    let data = await fetchRoute(wallet);
+    let retried = false;
 
-        const route = routePlan[0]?.swapInfo;
-        const routeLabel = route?.label || "Unknown";
-        const percent = routePlan[0]?.percent || 100;
+    // If error with wallet, retry without taker to get route preview
+    if (data.error) {
+        console.warn("First route failed, retrying without wallet...");
+        data = await fetchRoute(null);
+        retried = true;
+    }
 
-        const formattedMsg = `
-🔀 *Route Preview*
-Swap Type: *${swapType.toUpperCase()}*
-DEX: *${routeLabel}* (${percent}%)
+    // Still failed? Give up.
+    if (data.error || !data.routePlan) {
+        return bot.sendMessage(chatId, `❌ Could not fetch route.\nReason: ${data.error || 'Unknown error'}`);
+    }
+
+    const {
+        swapType,
+        requestId,
+        inAmount,
+        outAmount,
+        slippageBps,
+        priceImpactPct,
+        routePlan,
+        gasless,
+    } = data;
+
+    let responseText = `
+🔀 *Route ${retried ? "Preview (No Wallet)" : "Preview"}*
+Swap Type: *${swapType?.toUpperCase() || 'Unknown'}*
 Gasless: *${gasless ? "Yes" : "No"}*
-
-📥 In: ${Number(inAmount) / 1e9} ${route.inputMint.slice(0, 4)}...
-📤 Out: ${Number(outAmount) / 1e6} ${route.outputMint.slice(0, 4)}...
-
-💸 Slippage: ${slippageBps / 100}%  
+💸 Slippage: ${slippageBps / 100}%
 📉 Price Impact: ${priceImpactPct}%
 🆔 Request ID: \`${requestId?.slice(0, 8)}...\`
+${retried ? "⚠️ *Note: Your wallet likely has insufficient balance. This is a preview only.*" : ""}
 `;
 
-        bot.sendMessage(chatId, formattedMsg, { parse_mode: "Markdown" });
-    } catch (err) {
-        console.error(err);
-        bot.sendMessage(chatId, "❌ Failed to fetch route. Check inputs or try again.");
-    }
+    // Add details for each route plan
+    routePlan.forEach((route, idx) => {
+        const swap = route.swapInfo;
+        const percent = route.percent || 100;
+        const fee = Number(swap.feeAmount || 0) / 1e9;
+
+        responseText += `
+\n🔁 *Route ${idx + 1} (${percent}% via ${swap.label})*
+• 🧩 AMM: \`${swap.ammKey.slice(0, 8)}...\`
+• 📥 In: ${Number(swap.inAmount) / 1e9} ${swap.inputMint.slice(0, 4)}...
+• 📤 Out: ${Number(swap.outAmount) / 1e6} ${swap.outputMint.slice(0, 4)}...
+• 💰 Fee: ${fee} ${swap.feeMint.slice(0, 4)}...
+`;
+    });
+
+    bot.sendMessage(chatId, responseText, { parse_mode: "Markdown" });
 });
+
 //custom to send notifications based on price conditions
 bot.onText(/\/notify (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
