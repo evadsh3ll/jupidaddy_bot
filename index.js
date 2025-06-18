@@ -429,7 +429,10 @@ bot.on('callback_query', async (query) => {
 //NLP intent parsing and message handling
 bot.on('message', async (msg) => {
     const chatId = String(msg.chat.id);
-    const text = msg.text?.toLowerCase().trim();
+const rawText = msg.text;
+if (!rawText || rawText.startsWith('/')) return;
+
+const text = rawText.toLowerCase().trim();
 
     // Ignore regular commands like /start
     if (text.startsWith('/')) return;
