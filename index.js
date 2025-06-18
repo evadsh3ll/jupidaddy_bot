@@ -226,10 +226,12 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
 bot.onText(/\/route (.+)/, async (msg, match) => {
     const chatId = String(msg.chat.id);
     const wallet = userWalletMap.get(chatId);
-    const input = match[1]?.trim()?.split(" ");
+    const session = userSessionMap.get(chatId);
+    const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
 
-    if (!wallet) {
-        return bot.sendMessage(chatId, "❌ Wallet not connected. Use /connect first.");
+    const input = match[1]?.trim()?.split(" ");
+    if (!wallet || !session || !phantomEncryptionPubKey) {
+        return bot.sendMessage(chatId, "❌ You must connect your wallet first. Use /connect.");
     }
 
     if (!input || input.length !== 3) {
@@ -238,24 +240,20 @@ bot.onText(/\/route (.+)/, async (msg, match) => {
 
     const [inputMint, outputMint, amount] = input;
 
-    async function fetchRoute(taker) {
-        const baseUrl = `https://lite-api.jup.ag/ultra/v1/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`;
-        const url = taker ? `${baseUrl}&taker=${taker}` : baseUrl;
-        const response = await fetch(url);
-        return response.json();
-    }
+    const fetchOrder = async (includeWallet = true) => {
+        const base = `https://lite-api.jup.ag/ultra/v1/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`;
+        const url = includeWallet ? `${base}&taker=${wallet}` : base;
+        const res = await fetch(url);
+        return res.json();
+    };
 
-    let data = await fetchRoute(wallet);
+    let data = await fetchOrder(true);
     let retried = false;
-
-    // If error with wallet, retry without taker to get route preview
-    if (data.error) {
-        console.warn("First route failed, retrying without wallet...");
-        data = await fetchRoute(null);
+    if (data.error || !data.transaction) {
+        data = await fetchOrder(false);
         retried = true;
     }
 
-    // Still failed? Give up.
     if (data.error || !data.routePlan) {
         return bot.sendMessage(chatId, `❌ Could not fetch route.\nReason: ${data.error || 'Unknown error'}`);
     }
@@ -269,34 +267,71 @@ bot.onText(/\/route (.+)/, async (msg, match) => {
         priceImpactPct,
         routePlan,
         gasless,
+        transaction,
     } = data;
 
-    let responseText = `
-🔀 *Route ${retried ? "Preview (No Wallet)" : "Preview"}*
+    let routeDetails = `
+🔀 *Route ${retried ? "Preview (No Wallet)" : "Details"}*
 Swap Type: *${swapType?.toUpperCase() || 'Unknown'}*
 Gasless: *${gasless ? "Yes" : "No"}*
 💸 Slippage: ${slippageBps / 100}%
 📉 Price Impact: ${priceImpactPct}%
 🆔 Request ID: \`${requestId?.slice(0, 8)}...\`
-${retried ? "⚠️ *Note: Your wallet likely has insufficient balance. This is a preview only.*" : ""}
+${retried ? "⚠️ *Insufficient balance. Preview only.*" : ""}
 `;
 
-    // Add details for each route plan
     routePlan.forEach((route, idx) => {
-        const swap = route.swapInfo;
-        const percent = route.percent || 100;
-        const fee = Number(swap.feeAmount || 0) / 1e9;
-
-        responseText += `
-\n🔁 *Route ${idx + 1} (${percent}% via ${swap.label})*
-• 🧩 AMM: \`${swap.ammKey.slice(0, 8)}...\`
-• 📥 In: ${Number(swap.inAmount) / 1e9} ${swap.inputMint.slice(0, 4)}...
-• 📤 Out: ${Number(swap.outAmount) / 1e6} ${swap.outputMint.slice(0, 4)}...
-• 💰 Fee: ${fee} ${swap.feeMint.slice(0, 4)}...
-`;
+        const s = route.swapInfo;
+        const pct = route.percent || 100;
+        const fee = Number(s.feeAmount || 0) / 1e9;
+        routeDetails += `
+\n🔁 *Route ${idx + 1} (${pct}% via ${s.label})*
+• 🧩 AMM: \`${s.ammKey.slice(0, 8)}...\`
+• 📥 In: ${Number(s.inAmount) / 1e9} ${s.inputMint.slice(0, 4)}...
+• 📤 Out: ${Number(s.outAmount) / 1e6} ${s.outputMint.slice(0, 4)}...
+• 💰 Fee: ${fee} ${s.feeMint.slice(0, 4)}...`;
     });
 
-    bot.sendMessage(chatId, responseText, { parse_mode: "Markdown" });
+    if (retried || !transaction) {
+        return bot.sendMessage(chatId, routeDetails, { parse_mode: "Markdown" });
+    }
+
+    try {
+        // Encrypt transaction with Phantom pubkey
+        const nonce = nacl.randomBytes(24);
+        const nonceB58 = bs58.encode(nonce);
+
+        const sharedSecret = nacl.box.before(
+            bs58.decode(phantomEncryptionPubKey),
+            dappKeyPair.secretKey
+        );
+
+        const payloadJson = JSON.stringify({
+            transaction: transaction, // base64 encoded from Ultra
+            session: session
+        });
+
+        const encryptedPayload = nacl.box.after(Buffer.from(payloadJson), nonce, sharedSecret);
+        const encryptedPayloadB58 = bs58.encode(encryptedPayload);
+
+        const redirectLink = `https://5966-2405-201-301c-4114-e84a-e2bf-875a-55fe.ngrok-free.app/phantom/ultra-execute?chat_id=${chatId}&order_id=${requestId}`;
+
+        const phantomParams = new URLSearchParams({
+            dapp_encryption_public_key: dappPublicKey,
+            nonce: nonceB58,
+            redirect_link: encodeURIComponent(redirectLink),
+            payload: encryptedPayloadB58
+        });
+
+        const phantomLink = `https://phantom.app/ul/v1/signTransaction?${phantomParams.toString()}`;
+
+        routeDetails += `\n\n✅ [Sign and Execute Transaction](${phantomLink})`;
+
+        await bot.sendMessage(chatId, routeDetails, { parse_mode: "Markdown" });
+    } catch (err) {
+        console.error("Encryption/signing error:", err);
+        bot.sendMessage(chatId, "❌ Failed to prepare transaction for Phantom.");
+    }
 });
 
 //custom to send notifications based on price conditions
@@ -541,6 +576,55 @@ app.get("/phantom/execute", async (req, res) => {
     } catch (err) {
         console.error("Execution error:", err?.response || err.message);
         res.status(500).send("❌ Failed to execute order.");
+    }
+});
+// Phantom Ultra execute endpoint to handle signed transaction execution for ULTRA API
+app.get("/phantom/ultra-execute", async (req, res) => {
+    const { nonce, data, chat_id, order_id } = req.query;
+    if (!nonce || !data || !chat_id || !order_id) {
+        return res.status(400).send("❌ Missing params.");
+    }
+    if (!e_key) return res.status(400).send("❌ Missing Phantom key.");
+
+    try {
+        const sharedSecret = nacl.box.before(
+            bs58.decode(e_key),
+            dappKeyPair.secretKey
+        );
+
+        const decrypted = nacl.box.open.after(
+            bs58.decode(data),
+            bs58.decode(nonce),
+            sharedSecret
+        );
+
+        const json = JSON.parse(Buffer.from(decrypted).toString());
+        const signedTxBase58 = json.transaction;
+        const signedTxBase64 = bs58.decode(signedTxBase58).toString("base64");
+
+        const execRes = await axios.post("https://lite-api.jup.ag/ultra/v1/execute", {
+            signedTransaction: signedTxBase64,
+            requestId: order_id
+        });
+
+        const { signature, status } = execRes.data;
+
+        bot.sendMessage(chat_id, `✅ Swap Executed!\n🔗 [Solscan](https://solscan.io/tx/${signature})\nStatus: *${status}*`, {
+            parse_mode: "Markdown"
+        });
+
+        res.send(`
+        <html>
+            <body>
+                <h2>✅ Swap Executed</h2>
+                <p>Signature: ${signature}</p>
+                <a href="tg://resolve?domain=jupidaddy_bot">🔙 Back to Telegram</a>
+            </body>
+        </html>
+        `);
+    } catch (err) {
+        console.error("Ultra exec error:", err?.response?.data || err.message);
+        res.status(500).send("❌ Failed to execute transaction.");
     }
 });
 
