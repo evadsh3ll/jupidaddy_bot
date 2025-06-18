@@ -30,7 +30,7 @@ bot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
     bot.sendMessage(chatId, 'Available commands:\n/start - Start the bot\n/help - Show help');
 });
-
+//Phantom Deeplink
 bot.onText(/\/connect/, (msg) => {
     const chatId = msg.chat.id;
     const redirectLink = `https://5966-2405-201-301c-4114-e84a-e2bf-875a-55fe.ngrok-free.app/phantom/callback?chat_id=${chatId}`;
@@ -46,7 +46,7 @@ bot.onText(/\/connect/, (msg) => {
         parse_mode: 'Markdown'
     });
 });
-
+//ULTRA API balance
 bot.onText(/\/about/, async (msg) => {
     const chatId = String(msg.chat.id);
     const wallet = userWalletMap.get(chatId);
@@ -71,7 +71,7 @@ bot.onText(/\/about/, async (msg) => {
         bot.sendMessage(chatId, "⚠️ Failed to fetch balance. Please try again later.");
     }
 });
-
+//PRICE API
 bot.onText(/\/price (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const mintAddress = match[1].trim();
@@ -100,7 +100,7 @@ bot.onText(/\/price (.+)/, async (msg, match) => {
         bot.sendMessage(chatId, "⚠️ Failed to fetch data. Double-check the mint address.");
     }
 });
-
+//TOKEN API
 bot.onText(/\/tokens/, async (msg) => {
     const chatId = msg.chat.id;
     try {
@@ -122,7 +122,7 @@ bot.onText(/\/tokens/, async (msg) => {
         bot.sendMessage(chatId, '❌ Failed to fetch token list.');
     }
 });
-
+//TRIGGER API
 bot.onText(/\/trigger (.+)/, async (msg, match) => {
     const chatId = String(msg.chat.id);
     const wallet = userWalletMap.get(chatId);
@@ -205,8 +205,8 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
         const phantomParams = new URLSearchParams({
             dapp_encryption_public_key: dappPublicKey,
             nonce: nonceB58,
-    redirect_link: encodeURIComponent(redirectLink), // ✅ encode this!
-              payload: encryptedPayloadB58
+            redirect_link: encodeURIComponent(redirectLink), // ✅ encode this!
+            payload: encryptedPayloadB58
 
         });
 
@@ -222,51 +222,51 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
         bot.sendMessage(chatId, "❌ Failed to create trigger.");
     }
 });
-
+//ULTRA API 
 bot.onText(/\/route (.+)/, async (msg, match) => {
-  const chatId = String(msg.chat.id);
-  const wallet = userWalletMap.get(chatId);
-  const input = match[1]?.trim()?.split(" ");
+    const chatId = String(msg.chat.id);
+    const wallet = userWalletMap.get(chatId);
+    const input = match[1]?.trim()?.split(" ");
 
-  if (!wallet) {
-    bot.sendMessage(chatId, "❌ Wallet not connected. Use /connect first.");
-    return;
-  }
-
-  if (!input || input.length !== 3) {
-    bot.sendMessage(chatId, "❌ Usage:\n/route <inputMint> <outputMint> <amountInLamports>");
-    return;
-  }
-console.log("Route input:", wallet);
-  const [inputMint, outputMint, amount] = input;
-
-  try {
-    const url = `https://lite-api.jup.ag/ultra/v1/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&taker=${wallet}`;
-    const response = await fetch(url);
-    const data = await response.json();
-console.log("Route response:", data.routePlan);
-console.log("Route response:", data);
-    if (data.error) {
-      bot.sendMessage(chatId, `❌ API Error: ${data.error}`);
-      return;
+    if (!wallet) {
+        bot.sendMessage(chatId, "❌ Wallet not connected. Use /connect first.");
+        return;
     }
 
-    const {
-      swapType,
-      requestId,
-      inAmount,
-      outAmount,
-      slippageBps,
-      priceImpactPct,
-      routePlan,
-      gasless,
-    } = data;
+    if (!input || input.length !== 3) {
+        bot.sendMessage(chatId, "❌ Usage:\n/route <inputMint> <outputMint> <amountInLamports>");
+        return;
+    }
+    console.log("Route input:", wallet);
+    const [inputMint, outputMint, amount] = input;
 
-    const route = routePlan[0]?.swapInfo;
-    const routeLabel = route?.label || "Unknown";
-    const percent = routePlan[0]?.percent || 100;
+    try {
+        const url = `https://lite-api.jup.ag/ultra/v1/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&taker=${wallet}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        console.log("Route response:", data.routePlan);
+        console.log("Route response:", data);
+        if (data.error) {
+            bot.sendMessage(chatId, `❌ API Error: ${data.error}`);
+            return;
+        }
 
-    const formattedMsg = `
+        const {
+            swapType,
+            requestId,
+            inAmount,
+            outAmount,
+            slippageBps,
+            priceImpactPct,
+            routePlan,
+            gasless,
+        } = data;
+
+        const route = routePlan[0]?.swapInfo;
+        const routeLabel = route?.label || "Unknown";
+        const percent = routePlan[0]?.percent || 100;
+
+        const formattedMsg = `
 🔀 *Route Preview*
 Swap Type: *${swapType.toUpperCase()}*
 DEX: *${routeLabel}* (${percent}%)
@@ -280,16 +280,13 @@ Gasless: *${gasless ? "Yes" : "No"}*
 🆔 Request ID: \`${requestId?.slice(0, 8)}...\`
 `;
 
-    bot.sendMessage(chatId, formattedMsg, { parse_mode: "Markdown" });
-  } catch (err) {
-    console.error(err);
-    bot.sendMessage(chatId, "❌ Failed to fetch route. Check inputs or try again.");
-  }
+        bot.sendMessage(chatId, formattedMsg, { parse_mode: "Markdown" });
+    } catch (err) {
+        console.error(err);
+        bot.sendMessage(chatId, "❌ Failed to fetch route. Check inputs or try again.");
+    }
 });
-
-
-
-
+//custom to send notifications based on price conditions
 bot.onText(/\/notify (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const input = match[1].trim().split(" ");
@@ -381,7 +378,7 @@ bot.on('callback_query', async (query) => {
     }
 });
 
-
+//NLP intent parsing and message handling
 bot.on('message', async (msg) => {
     const chatId = String(msg.chat.id);
     const text = msg.text?.toLowerCase().trim();
@@ -424,11 +421,10 @@ bot.on('message', async (msg) => {
     }
 });
 
-
 app.get('/', (req, res) => {
     res.send('Telegram Bot is running!');
 });
-
+// Phantom callback endpoint to handle wallet connection
 app.get('/phantom/callback', async (req, res) => {
 
 
@@ -457,7 +453,7 @@ app.get('/phantom/callback', async (req, res) => {
         const sessionId = json.session;
         userWalletMap.set(String(chat_id), wallet);
         userSessionMap.set(String(chat_id), sessionId);
-userPhantomPubkeyMap.set(String(chat_id), phantom_encryption_public_key);
+        userPhantomPubkeyMap.set(String(chat_id), phantom_encryption_public_key);
 
         bot.sendMessage(chat_id, `✅ Wallet connected: \n${wallet}`);
 
@@ -475,17 +471,19 @@ userPhantomPubkeyMap.set(String(chat_id), phantom_encryption_public_key);
         res.status(500).send("Failed to decrypt Phantom data.");
     }
 });
+
+// Phantom execute endpoint to handle signed transaction execution for TRIGGER API
 app.get("/phantom/execute", async (req, res) => {
-    const {  nonce, data, chat_id, order_id } = req.query;
+    const { nonce, data, chat_id, order_id } = req.query;
     console.log("Execute params:", req.query);
     if (!nonce || !data || !chat_id || !order_id) {
         return res.status(400).send("❌ Missing parameters.");
     }
-if (!e_key) return res.status(400).send("Missing encryption key.");
-console.log("Using encryption key:", e_key);
+    if (!e_key) return res.status(400).send("Missing encryption key.");
+    console.log("Using encryption key:", e_key);
     try {
-       
-   const sharedSecret = nacl.box.before(
+
+        const sharedSecret = nacl.box.before(
             bs58.decode(e_key),
             dappKeyPair.secretKey
         );
@@ -499,8 +497,8 @@ console.log("Using encryption key:", e_key);
         const json = JSON.parse(Buffer.from(decryptedData).toString());
         // const signedTx = json.transaction;
         const signedTxBase58 = json.transaction;
-const signedTxBuffer = bs58.decode(signedTxBase58);
-const signedTxBase64 = signedTxBuffer.toString("base64");
+        const signedTxBuffer = bs58.decode(signedTxBase58);
+        const signedTxBase64 = signedTxBuffer.toString("base64");
 
 
         // ✅ Execute the signed tx with Jupiter
