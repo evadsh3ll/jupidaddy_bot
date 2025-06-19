@@ -14,6 +14,7 @@ const dappPublicKey = bs58.encode(dappKeyPair.publicKey); // used in connect URL
 dotenv.config();
 const port = process.env.PORT;
 const token = process.env.TELEGRAM_BOT_TOKEN;
+const server_url = process.env.SERVER_URL;
 const userWalletMap = new Map(); // chat_id → walletAddress
 const userSessionMap = new Map(); // chat_id → sessionId
 const bot = new TelegramBot(token, { polling: true });
@@ -33,7 +34,7 @@ bot.onText(/\/help/, (msg) => {
 //Phantom Deeplink
 bot.onText(/\/connect/, (msg) => {
     const chatId = msg.chat.id;
-    const redirectLink = `https://5966-2405-201-301c-4114-e84a-e2bf-875a-55fe.ngrok-free.app/phantom/callback?chat_id=${chatId}`;
+    const redirectLink = `${server_url}/phantom/callback?chat_id=${chatId}`;
     const params = new URLSearchParams({
         dapp_encryption_public_key: dappPublicKey,
         app_url: 'https://phantom.app',
@@ -124,7 +125,7 @@ bot.onText(/\/tokens/, async (msg) => {
 });
 //TRIGGER API
 bot.onText(/\/trigger (.+)/, async (msg, match) => {
-    const chatId = String(msg.chat.id);
+     const chatId = String(msg.chat.id);
     const wallet = userWalletMap.get(chatId);
     const session = userSessionMap.get(chatId);
 
@@ -133,8 +134,40 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
     }
 
     const args = match[1].trim().split(" ");
+
+    if (args[0] === 'orders') {
+        const res = await axios.get(`https://lite-api.jup.ag/trigger/v1/getTriggerOrders?user=${wallet}&orderStatus=active`);
+        if (!res.data.length) return bot.sendMessage(chatId, "📭 No active orders.");
+        const orders = res.data.map(o => `• 🆔 ${o.order} (${o.params.makingAmount} → ${o.params.takingAmount})`);
+        return bot.sendMessage(chatId, `📋 *Active Orders*\n\n${orders.join('\n')}`, { parse_mode: "Markdown" });
+    }
+
+    if (args[0] === 'orderhistory') {
+        const res = await axios.get(`https://lite-api.jup.ag/trigger/v1/getTriggerOrders?user=${wallet}&orderStatus=history`);
+        if (!res.data.length) return bot.sendMessage(chatId, "📭 No order history found.");
+        const orders = res.data.map(o => `• 🆔 ${o.order} (${o.params.makingAmount} → ${o.params.takingAmount})`);
+        return bot.sendMessage(chatId, `📜 *Order History*\n\n${orders.join('\n')}`, { parse_mode: "Markdown" });
+    }
+
+    if (args[0] === 'cancelorder') {
+        const res = await axios.get(`https://lite-api.jup.ag/trigger/v1/getTriggerOrders?user=${wallet}&orderStatus=active`);
+        const orders = res.data;
+        if (!orders.length) return bot.sendMessage(chatId, "📭 No active orders to cancel.");
+
+        const keyboard = orders.map(o => [{
+            text: `Cancel ${o.params.makingAmount} → ${o.params.takingAmount}`,
+            callback_data: `cancel_${o.order}`
+        }]);
+
+        return bot.sendMessage(chatId, `🗑️ *Choose an order to cancel:*`, {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    }
+
+    // Default fallback to actual order trigger
     if (args.length !== 4) {
-        return bot.sendMessage(chatId, `⚠️ Usage:\n/trigger <inputMint> <outputMint> <amount> <targetPrice>\n\nExample:\n/trigger So111... EPjF... 1 0.2`);
+        return bot.sendMessage(chatId, `⚠️ Usage:\n/trigger <inputMint> <outputMint> <amount> <targetPrice>\n/trigger orders\n/trigger orderhistory\n/trigger cancelorder`);
     }
 
     const [inputMint, outputMint, amountStr, targetPriceStr] = args;
@@ -201,7 +234,7 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
         }
 
         // 2. Generate Phantom signing link
-        const redirectLink = `https://5966-2405-201-301c-4114-e84a-e2bf-875a-55fe.ngrok-free.app/phantom/execute?chat_id=${chatId}&order_id=${orderId}`;
+        const redirectLink = `${server_url}/phantom/execute?chat_id=${chatId}&order_id=${orderId}`;
         const phantomParams = new URLSearchParams({
             dapp_encryption_public_key: dappPublicKey,
             nonce: nonceB58,
@@ -314,7 +347,7 @@ ${retried ? "⚠️ *Insufficient balance. Preview only.*" : ""}
         const encryptedPayload = nacl.box.after(Buffer.from(payloadJson), nonce, sharedSecret);
         const encryptedPayloadB58 = bs58.encode(encryptedPayload);
 
-        const redirectLink = `https://5966-2405-201-301c-4114-e84a-e2bf-875a-55fe.ngrok-free.app/phantom/ultra-execute?chat_id=${chatId}&order_id=${requestId}`;
+        const redirectLink = `${server_url}/phantom/ultra-execute?chat_id=${chatId}&order_id=${requestId}`;
 
         const phantomParams = new URLSearchParams({
             dapp_encryption_public_key: dappPublicKey,
@@ -404,25 +437,87 @@ bot.onText(/\/notify (.+)/, async (msg, match) => {
 
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
-    const mint = query.data.replace('token_', '');
+    const data = query.data;
 
     try {
-        const [tokenResponse, priceResponse] = await Promise.all([
-            axios.get(`https://lite-api.jup.ag/tokens/v1/token/${mint}`),
-            axios.get(`https://lite-api.jup.ag/price/v2?ids=${mint}`)
-        ]);
+        if (data.startsWith('token_')) {
+            const mint = data.replace('token_', '');
 
-        const token = tokenResponse.data;
-        const price = priceResponse.data[mint]?.price ?? 0;
+            const [tokenResponse, priceResponse] = await Promise.all([
+                axios.get(`https://lite-api.jup.ag/tokens/v1/token/${mint}`),
+                axios.get(`https://lite-api.jup.ag/price/v2?ids=${mint}`)
+            ]);
 
-        const caption = `💠 *${token.name} (${token.symbol})*\n\n💵 *Price*: $${price.toFixed(4)}\n📦 Volume (24h): $${Math.floor(token.daily_volume).toLocaleString()}`;
-        bot.sendPhoto(chatId, token.logoURI, {
-            caption,
-            parse_mode: 'Markdown'
-        });
-    } catch (e) {
-        console.error(e);
-        bot.sendMessage(chatId, '❌ Failed to fetch token details.');
+            const token = tokenResponse.data;
+            const price = priceResponse.data[mint]?.price ?? 0;
+
+            const caption = `💠 *${token.name} (${token.symbol})*\n\n💵 *Price*: $${price.toFixed(4)}\n📦 Volume (24h): $${Math.floor(token.daily_volume).toLocaleString()}`;
+
+            return bot.sendPhoto(chatId, token.logoURI, {
+                caption,
+                parse_mode: 'Markdown'
+            });
+        }
+
+        if (data.startsWith('cancel_')) {
+            const orderId = data.replace('cancel_', '');
+            const wallet = userWalletMap.get(chatId);
+            const session = userSessionMap.get(chatId);
+            const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
+
+            if (!wallet || !session || !phantomEncryptionPubKey) {
+                return bot.sendMessage(chatId, "❌ Missing wallet/session. Use /connect again.");
+            }
+
+            const cancelPayload = {
+                maker: wallet,
+                order: orderId,
+                computeUnitPrice: "auto"
+            };
+
+            const cancelRes = await axios.post("https://lite-api.jup.ag/trigger/v1/cancelOrder", cancelPayload, {
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            const txBase58 = cancelRes.data?.transaction;
+            if (!txBase58) {
+                return bot.sendMessage(chatId, "❌ Failed to get cancellation transaction.");
+            }
+
+            const nonce = nacl.randomBytes(24);
+            const nonceB58 = bs58.encode(nonce);
+            const sharedSecret = nacl.box.before(
+                bs58.decode(phantomEncryptionPubKey),
+                dappKeyPair.secretKey
+            );
+
+            const payloadJson = JSON.stringify({
+                transaction: txBase58,
+                session: session
+            });
+
+            const encryptedPayload = nacl.box.after(Buffer.from(payloadJson), nonce, sharedSecret);
+            const encryptedPayloadB58 = bs58.encode(encryptedPayload);
+
+            const redirectLink = `${server_url}/phantom/execute?chat_id=${chatId}&order_id=${orderId}`;
+            const phantomParams = new URLSearchParams({
+                dapp_encryption_public_key: dappPublicKey,
+                nonce: nonceB58,
+                redirect_link: encodeURIComponent(redirectLink),
+                payload: encryptedPayloadB58
+            });
+
+            const phantomLink = `https://phantom.app/ul/v1/signTransaction?${phantomParams.toString()}`;
+
+            return bot.sendMessage(chatId, `⚠️ *Sign to Cancel Order*\n🆔 Order ID: \`${orderId}\`\n\n[Sign Cancel Transaction](${phantomLink})`, {
+                parse_mode: "Markdown"
+            });
+        }
+
+        return bot.sendMessage(chatId, "⚠️ Unknown action.");
+    } catch (err) {
+        console.error("Callback Query Error:", err?.response?.data || err.message);
+        return bot.sendMessage(chatId, "❌ Something went wrong while processing your request.");
     }
 });
 
@@ -444,7 +539,7 @@ const text = rawText.toLowerCase().trim();
 
         switch (intent) {
             case 'connect_wallet':
-                const redirectLink = `https://5966-2405-201-301c-4114-e84a-e2bf-875a-55fe.ngrok-free.app/phantom/callback?chat_id=${chatId}`;
+                const redirectLink = `${server_url}/phantom/callback?chat_id=${chatId}`;
                 const params = new URLSearchParams({
                     dapp_encryption_public_key: dappPublicKey,
                     app_url: 'https://phantom.app',
