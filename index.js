@@ -125,7 +125,7 @@ bot.onText(/\/tokens/, async (msg) => {
 });
 //TRIGGER API
 bot.onText(/\/trigger (.+)/, async (msg, match) => {
-     const chatId = String(msg.chat.id);
+    const chatId = String(msg.chat.id);
     const wallet = userWalletMap.get(chatId);
     const session = userSessionMap.get(chatId);
 
@@ -135,18 +135,23 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
 
     const args = match[1].trim().split(" ");
 
-    if (args[0] === 'orders') {
-        const res = await axios.get(`https://lite-api.jup.ag/trigger/v1/getTriggerOrders?user=${wallet}&orderStatus=active`);
-        if (!res.data.length) return bot.sendMessage(chatId, "📭 No active orders.");
-        const orders = res.data.map(o => `• 🆔 ${o.order} (${o.params.makingAmount} → ${o.params.takingAmount})`);
-        return bot.sendMessage(chatId, `📋 *Active Orders*\n\n${orders.join('\n')}`, { parse_mode: "Markdown" });
-    }
+    if (args[0] === 'orders' || args[0] === 'orderhistory') {
+        const orderStatus = args[0] === 'orders' ? 'active' : 'history';
+        const res = await axios.get(`https://lite-api.jup.ag/trigger/v1/getTriggerOrders?user=${wallet}&orderStatus=${orderStatus}`);
+        if (!res.data.length) return bot.sendMessage(chatId, `📭 No ${orderStatus === 'active' ? 'active orders' : 'order history'} found.`);
 
-    if (args[0] === 'orderhistory') {
-        const res = await axios.get(`https://lite-api.jup.ag/trigger/v1/getTriggerOrders?user=${wallet}&orderStatus=history`);
-        if (!res.data.length) return bot.sendMessage(chatId, "📭 No order history found.");
-        const orders = res.data.map(o => `• 🆔 ${o.order} (${o.params.makingAmount} → ${o.params.takingAmount})`);
-        return bot.sendMessage(chatId, `📜 *Order History*\n\n${orders.join('\n')}`, { parse_mode: "Markdown" });
+        const tokenInfo = await axios.get('https://lite-api.jup.ag/tokens/v1/all');
+        const tokenMap = Object.fromEntries(tokenInfo.data.map(t => [t.address, t]));
+
+        const formatted = res.data.map(o => {
+            const input = tokenMap[o.inputMint];
+            const output = tokenMap[o.outputMint];
+            const amountIn = (parseFloat(o.params.makingAmount) / Math.pow(10, input.decimals)).toFixed(4);
+            const amountOut = (parseFloat(o.params.takingAmount) / Math.pow(10, output.decimals)).toFixed(4);
+            return `• ${amountIn} ${input.symbol} → ${amountOut} ${output.symbol}`;
+        });
+
+        return bot.sendMessage(chatId, `📋 *${orderStatus === 'active' ? 'Active Orders' : 'Order History'}*\n\n${formatted.join('\n')}`, { parse_mode: "Markdown" });
     }
 
     if (args[0] === 'cancelorder') {
@@ -165,7 +170,6 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
         });
     }
 
-    // Default fallback to actual order trigger
     if (args.length !== 4) {
         return bot.sendMessage(chatId, `⚠️ Usage:\n/trigger <inputMint> <outputMint> <amount> <targetPrice>\n/trigger orders\n/trigger orderhistory\n/trigger cancelorder`);
     }
@@ -173,80 +177,73 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
     const [inputMint, outputMint, amountStr, targetPriceStr] = args;
     const amount = parseFloat(amountStr);
     const targetPrice = parseFloat(targetPriceStr);
-
     if (isNaN(amount) || isNaN(targetPrice)) {
         return bot.sendMessage(chatId, "❌ Invalid amount or price.");
     }
 
     try {
-        // 1. Create the order
+        const [inputToken, outputToken] = await Promise.all([
+            axios.get(`https://lite-api.jup.ag/tokens/v1/token/${inputMint}`),
+            axios.get(`https://lite-api.jup.ag/tokens/v1/token/${outputMint}`)
+        ]);
+
+        const inputDecimals = inputToken.data.decimals;
+        const outputDecimals = outputToken.data.decimals;
+
+        const makingAmount = (amount * Math.pow(10, inputDecimals)).toFixed(0);
+        const takingAmount = (amount * targetPrice * Math.pow(10, outputDecimals)).toFixed(0);
+
         const createPayload = {
             inputMint,
             outputMint,
             maker: wallet,
             payer: wallet,
             params: {
-                makingAmount: amountStr,
-                takingAmount: (amount * targetPrice).toString()
+                makingAmount,
+                takingAmount,
+                expiredAt: Math.floor(Date.now() / 1000) + 3600
             },
-            computeUnitPrice: "auto"
+            computeUnitPrice: "auto",
+            inputTokenProgram: inputToken.data.extensions?.token_program || '',
+            outputTokenProgram: outputToken.data.extensions?.token_program || '',
+            wrapAndUnwrapSol: true
         };
 
-        const createRes = await axios.post(
-            "https://api.jup.ag/trigger/v1/createOrder",
-            createPayload,
-            { headers: { 'Content-Type': 'application/json' } }
-        );
+        const createRes = await axios.post("https://api.jup.ag/trigger/v1/createOrder", createPayload, {
+            headers: { 'Content-Type': 'application/json' }
+        });
 
         const orderId = createRes.data?.requestId;
         const txBase58 = createRes.data?.transaction;
-        // Phantom's public key (you get this in the connect step earlier)
-        const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId); // <-- you MUST save this in /phantom/callback
 
+        const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
         if (!phantomEncryptionPubKey) {
             return bot.sendMessage(chatId, "❌ Missing Phantom encryption public key. Try /connect again.");
         }
 
-        // 1. Generate a fresh nonce
         const nonce = nacl.randomBytes(24);
         const nonceB58 = bs58.encode(nonce);
 
-        // 2. Create shared secret using Phantom's pubkey + your private key
         const sharedSecret = nacl.box.before(
             bs58.decode(phantomEncryptionPubKey),
             dappKeyPair.secretKey
         );
 
-        // 3. Encrypt payload
-        const payloadJson = JSON.stringify({
-            transaction: txBase58,
-            session: session
-        });
-        const encryptedPayload = nacl.box.after(
-            Buffer.from(payloadJson),
-            nonce,
-            sharedSecret
-        );
+        const payloadJson = JSON.stringify({ transaction: txBase58, session });
+        const encryptedPayload = nacl.box.after(Buffer.from(payloadJson), nonce, sharedSecret);
         const encryptedPayloadB58 = bs58.encode(encryptedPayload);
 
-        if (!orderId || !txBase58) {
-            return bot.sendMessage(chatId, "⚠️ Failed to create order.");
-        }
-
-        // 2. Generate Phantom signing link
         const redirectLink = `${server_url}/phantom/execute?chat_id=${chatId}&order_id=${orderId}`;
         const phantomParams = new URLSearchParams({
             dapp_encryption_public_key: dappPublicKey,
             nonce: nonceB58,
-            redirect_link: encodeURIComponent(redirectLink), // ✅ encode this!
+            redirect_link: encodeURIComponent(redirectLink),
             payload: encryptedPayloadB58
-
         });
 
         const phantomLink = `https://phantom.app/ul/v1/signTransaction?${phantomParams.toString()}`;
 
-        // 3. Ask user to sign
-        await bot.sendMessage(chatId, `✅ Limit order created!\n🆔 Order ID: \`${orderId}\`\n\nPlease sign the transaction using Phantom: [Sign Transaction](${phantomLink})`, {
+        await bot.sendMessage(chatId, `✅ Limit order created!\n\n🆔 Order ID: \`${orderId}\`\n💰 ${amount} ${inputToken.data.symbol} @ $${targetPrice} → ${takingAmount / Math.pow(10, outputDecimals)} ${outputToken.data.symbol}\n\n👉 [Sign with Phantom](${phantomLink})`, {
             parse_mode: "Markdown"
         });
 
@@ -255,6 +252,7 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
         bot.sendMessage(chatId, "❌ Failed to create trigger.");
     }
 });
+
 //ULTRA API 
 bot.onText(/\/route (.+)/, async (msg, match) => {
     const chatId = String(msg.chat.id);
@@ -621,14 +619,11 @@ app.get('/phantom/callback', async (req, res) => {
 // Phantom execute endpoint to handle signed transaction execution for TRIGGER API
 app.get("/phantom/execute", async (req, res) => {
     const { nonce, data, chat_id, order_id } = req.query;
-    console.log("Execute params:", req.query);
-    if (!nonce || !data || !chat_id || !order_id) {
+    if (!nonce || !data || !chat_id || !order_id || !e_key) {
         return res.status(400).send("❌ Missing parameters.");
     }
-    if (!e_key) return res.status(400).send("Missing encryption key.");
-    console.log("Using encryption key:", e_key);
-    try {
 
+    try {
         const sharedSecret = nacl.box.before(
             bs58.decode(e_key),
             dappKeyPair.secretKey
@@ -641,13 +636,10 @@ app.get("/phantom/execute", async (req, res) => {
         );
 
         const json = JSON.parse(Buffer.from(decryptedData).toString());
-        // const signedTx = json.transaction;
         const signedTxBase58 = json.transaction;
         const signedTxBuffer = bs58.decode(signedTxBase58);
         const signedTxBase64 = signedTxBuffer.toString("base64");
 
-
-        // ✅ Execute the signed tx with Jupiter
         const execRes = await axios.post("https://lite-api.jup.ag/trigger/v1/execute", {
             signedTransaction: signedTxBase64,
             requestId: order_id
@@ -656,19 +648,19 @@ app.get("/phantom/execute", async (req, res) => {
         });
 
         const { signature, status } = execRes.data;
+        const txUrl = `https://explorer.helius.xyz/tx/${signature}?network=mainnet`;
 
-        // Notify user in Telegram
-        bot.sendMessage(chat_id, `✅ Order executed!\n\n🆔 Signature: \`${signature}\`\n📦 Status: ${status}`, {
+        await bot.sendMessage(chat_id, `✅ *Order Executed!*\n\n🆔 Signature: [${signature}](${txUrl})\n📦 Status: ${status}`, {
             parse_mode: "Markdown"
         });
 
         res.send(`
         <html>
-          <body>
-            <h2>✅ Order Executed</h2>
-            <p>Signature: ${signature}</p>
-            <a href="tg://resolve?domain=jupidaddy_bot">👉 Return to Telegram</a>
-          </body>
+            <body>
+                <h2>✅ Order Executed</h2>
+                <p><b>Signature:</b> <a href="${txUrl}" target="_blank">${signature}</a></p>
+                <a href="tg://resolve?domain=jupidaddy_bot">👉 Return to Telegram</a>
+            </body>
         </html>
         `);
     } catch (err) {
@@ -676,6 +668,7 @@ app.get("/phantom/execute", async (req, res) => {
         res.status(500).send("❌ Failed to execute order.");
     }
 });
+
 // Phantom Ultra execute endpoint to handle signed transaction execution for ULTRA API
 app.get("/phantom/ultra-execute", async (req, res) => {
     const { nonce, data, chat_id, order_id } = req.query;
