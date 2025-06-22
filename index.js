@@ -5,7 +5,34 @@ import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import axios from 'axios';
 import crypto from 'crypto';
+import {
+  getAssociatedTokenAddress,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
+} from "@solana/spl-token";
+import { PublicKey } from "@solana/web3.js";
 import { parseIntent } from './nlp.js';
+const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // Your preferred token payment
+// const qr = require('qr-image');
+import qr from "qr-image"
+
+function encryptPayload(jsonPayload, phantomEncryptionPubKey) {
+  const nonce = nacl.randomBytes(24);
+  const sharedSecret = nacl.box.before(
+    bs58.decode(phantomEncryptionPubKey),
+    dappKeyPair.secretKey
+  );
+  const encryptedPayload = nacl.box.after(
+    Buffer.from(JSON.stringify(jsonPayload)),
+    nonce,
+    sharedSecret
+  );
+  return {
+    nonce: bs58.encode(nonce),
+    payload: bs58.encode(encryptedPayload)
+  };
+}
+
 const tokens = {
     solana: "So11111111111111111111111111111111111111112",
     SOL: "So11111111111111111111111111111111111111112",
@@ -89,7 +116,28 @@ const bot = new TelegramBot(token, { polling: true });
 app.use(express.json());
 const userPhantomPubkeyMap = new Map(); // chat_id → Phantom's public key
 const notifyWatchers = {}; // To track active notify sessions per chat
+const LAMPORTS_PER_SOL = 1_000_000_000;
+bot.on('polling_error', console.error);
 
+async function toLamports({ sol = null, usd = null } = {}) {
+    if (sol !== null) {
+        return Math.round(sol * LAMPORTS_PER_SOL);
+    }
+
+    if (usd !== null) {
+        try {
+            const res = await axios.get('https://lite-api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112');
+            console.log(res.data)
+            const solPrice = res.data.data["So11111111111111111111111111111111111111112"].price;
+            return Math.round((usd / solPrice) * LAMPORTS_PER_SOL);
+        } catch (e) {
+            console.error("Error fetching SOL price:", e.message);
+            throw new Error("❌ Failed to convert USD to lamports.");
+        }
+    }
+
+    throw new Error("❌ Must provide either SOL or USD for conversion.");
+}
 bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
     bot.sendMessage(chatId, `Hey ${msg.from.first_name}! 👋 I'm your bot.`);
@@ -115,6 +163,132 @@ bot.onText(/\/connect/, (msg) => {
         parse_mode: 'Markdown'
     });
 });
+bot.onText(/\/receivepayment (\d+)/, async (msg, match) => {
+  const chatId = String(msg.chat.id);
+  const merchantWallet = userWalletMap.get(chatId);
+  const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
+  const amount = Number(match[1]); // in micro USDC (e.g. 1 USDC = 1_000_000)
+
+  if (!merchantWallet || !phantomEncryptionPubKey) {
+    return bot.sendMessage(chatId, "❌ Please connect wallet first using /connect.");
+  }
+
+  try {
+    const merchantPublicKey = new PublicKey(merchantWallet);
+    const merchantUSDCATA = await getAssociatedTokenAddress(
+      USDC_MINT,
+      merchantPublicKey,
+      true,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+
+    const quoteUrl = `https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${USDC_MINT}&amount=${amount}&slippageBps=50&swapMode=ExactOut`;
+    const quote = await (await fetch(quoteUrl)).json();
+
+   const swapRes = await (await fetch(`https://lite-api.jup.ag/swap/v1/swap`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    quoteResponse: quote,
+    userPublicKey: merchantWallet,
+    destinationTokenAccount: merchantUSDCATA.toBase58()
+  })
+})).json();
+
+console.log(swapRes); // 👈 Do this to inspect structure!
+
+    const payload = {
+      transaction: swapRes.swapTransaction,
+      session: "payment" // optional
+    };
+
+    const { nonce, payload: encryptedPayload } = encryptPayload(payload, phantomEncryptionPubKey);
+
+    const redirect = `${server_url}/phantom/ultra-execute?chat_id=${chatId}&order_id=${swapRes.requestId}`;
+    const phantomParams = new URLSearchParams({
+      dapp_encryption_public_key: dappPublicKey,
+      nonce,
+      redirect_link: encodeURIComponent(redirect),
+      payload: encryptedPayload
+    });
+
+    const phantomLink = `https://phantom.app/ul/v1/signTransaction?${phantomParams.toString()}`;
+    console.log(phantomLink)
+    const qrData = qr.imageSync(phantomLink, { type: 'png' });
+
+    await bot.sendPhoto(chatId, qrData, {
+      caption: `🧾 Payment request: Pay ${amount / 1e6} USDC\n[Click here to pay with SOL](${phantomLink})`,
+      parse_mode: "Markdown"
+    });
+
+  } catch (err) {
+    console.error("/receivepayment error:", err);
+    bot.sendMessage(chatId, "❌ Failed to generate payment link.");
+  }
+});
+
+bot.onText(/\/payto (\w{32,44}) (\d+)/, async (msg, match) => {
+  const chatId = String(msg.chat.id);
+  const payerWallet = userWalletMap.get(chatId);
+  const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
+  const merchantWallet = match[1];
+  const amount = Number(match[2]); // in micro USDC
+
+  if (!payerWallet || !phantomEncryptionPubKey) {
+    return bot.sendMessage(chatId, "❌ Connect your wallet first using /connect.");
+  }
+
+  try {
+    const merchantPublicKey = new PublicKey(merchantWallet);
+    const merchantUSDCATA = await getAssociatedTokenAddress(
+      USDC_MINT,
+      merchantPublicKey,
+      true,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+
+    const quoteUrl = `https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${USDC_MINT}&amount=${amount}&slippageBps=50&swapMode=ExactOut`;
+    const quote = await (await fetch(quoteUrl)).json();
+
+    const swapRes = await (await fetch(`https://lite-api.jup.ag/swap/v1/swap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        quoteResponse: quote,
+        userPublicKey: payerWallet,
+        destinationTokenAccount: merchantUSDCATA.toBase58()
+      })
+    })).json();
+
+    const payload = {
+      transaction: swapRes.swapTransaction,
+      session: "payment"
+    };
+
+    const { nonce, payload: encryptedPayload } = encryptPayload(payload, phantomEncryptionPubKey);
+    const redirect = `${server_url}/phantom/ultra-execute?chat_id=${chatId}&order_id=${swapRes.requestId}`;
+
+    const phantomParams = new URLSearchParams({
+      dapp_encryption_public_key: dappPublicKey,
+      nonce,
+      redirect_link: encodeURIComponent(redirect),
+      payload: encryptedPayload
+    });
+
+    const phantomLink = `https://phantom.app/ul/v1/signTransaction?${phantomParams.toString()}`;
+
+    await bot.sendMessage(chatId, `💸 [Click here to pay ${amount / 1e6} USDC to merchant](${phantomLink})`, {
+      parse_mode: "Markdown"
+    });
+
+  } catch (err) {
+    console.error("/payto error:", err);
+    bot.sendMessage(chatId, "❌ Failed to generate payment transaction.");
+  }
+});
+
 //ULTRA API balance
 bot.onText(/\/about/, async (msg) => {
     const chatId = String(msg.chat.id);
@@ -239,7 +413,10 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
         return bot.sendMessage(chatId, `⚠️ Usage:\n/trigger <inputMint> <outputMint> <amount> <targetPrice>\n/trigger orders\n/trigger orderhistory\n/trigger cancelorder`);
     }
 
-    const [inputMint, outputMint, amountStr, targetPriceStr] = args;
+    const [inputMintName, outputMintName, amountStr, targetPriceStr] = args;
+const inputMint = resolveTokenMint(inputMintName);
+const outputMint = resolveTokenMint(outputMintName);
+console.log(inputMint,outputMint)
     const amount = parseFloat(amountStr);
     const targetPrice = parseFloat(targetPriceStr);
 
@@ -255,8 +432,8 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
             maker: wallet,
             payer: wallet,
             params: {
-                makingAmount: amountStr,
-                takingAmount: (amount * targetPrice).toString()
+                makingAmount:(await toLamports({ sol: amount })).toString(),
+                takingAmount: (await toLamports({ usd: amount * targetPrice })).toString()
             },
             computeUnitPrice: "auto"
         };
@@ -767,7 +944,8 @@ app.get("/phantom/ultra-execute", async (req, res) => {
 
         const json = JSON.parse(Buffer.from(decrypted).toString());
         const signedTxBase58 = json.transaction;
-        const signedTxBase64 = bs58.decode(signedTxBase58).toString("base64");
+        // const signedTxBase64 = bs58.decode(signedTxBase58).toString("base64");
+const signedTxBase64 = Buffer.from(bs58.decode(signedTxBase58)).toString("base64");
 
         const execRes = await axios.post("https://lite-api.jup.ag/ultra/v1/execute", {
             signedTransaction: signedTxBase64,
