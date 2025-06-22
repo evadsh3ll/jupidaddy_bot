@@ -12,95 +12,11 @@ import {
 } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 import { parseIntent } from './nlp.js';
+import { handleNLPCommand } from './handlers/commandHandler.js';
+import { resolveTokenMint } from './utils/tokens.js';
 const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // Your preferred token payment
 // const qr = require('qr-image');
 import qr from "qr-image"
-
-function encryptPayload(jsonPayload, phantomEncryptionPubKey) {
-  const nonce = nacl.randomBytes(24);
-  const sharedSecret = nacl.box.before(
-    bs58.decode(phantomEncryptionPubKey),
-    dappKeyPair.secretKey
-  );
-  const encryptedPayload = nacl.box.after(
-    Buffer.from(JSON.stringify(jsonPayload)),
-    nonce,
-    sharedSecret
-  );
-  return {
-    nonce: bs58.encode(nonce),
-    payload: bs58.encode(encryptedPayload)
-  };
-}
-
-const tokens = {
-    solana: "So11111111111111111111111111111111111111112",
-    SOL: "So11111111111111111111111111111111111111112",
-    sol: "So11111111111111111111111111111111111111112",
-
-    usdc: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-
-    wbtc: "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
-    WBTC: "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
-
-    weth: "2FPyTwcZLUg1MDrwsyoP4D6s1tM7hAkHYRjkNb5w6WxK",
-    WETH: "2FPyTwcZLUg1MDrwsyoP4D6s1tM7hAkHYRjkNb5w6WxK",
-
-    jup: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
-    jupiter: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
-
-    srm: "9LhH5Ffhmb7fKaMR7dUe4Coz8KWLPiVyqJcs69Mvth1B",
-    serum: "9LhH5Ffhmb7fKaMR7dUe4Coz8KWLPiVyqJcs69Mvth1B",
-
-    ray: "4k3Dyjzvzp8eZ6N5m7JxR3S6nLtWPhhqW37bZV8fDm7z",
-    raydium: "4k3Dyjzvzp8eZ6N5m7JxR3S6nLtWPhhqW37bZV8fDm7z",
-
-    fida: "E2Q3gxdrbFG6URZxdUizpfzRG7qAQFGxsRrMpZ9ncmyC",
-    bonfida: "E2Q3gxdrbFG6URZxdUizpfzRG7qAQFGxsRrMpZ9ncmyC",
-
-    mango: "4Z1ZVDK1r1JJb6VnGMGfMuGJeRQoY6Wj7C67cuDXS2xG",
-    mango_markets: "4Z1ZVDK1r1JJb6VnGMGfMuGJeRQoY6Wj7C67cuDXS2xG",
-    mngo: "4Z1ZVDK1r1JJb6VnGMGfMuGJeRQoY6Wj7C67cuDXS2xG",
-
-    step: "E3BTSJbQZFtvGp3vJy5sx3RZsX7d6z9Uohgn2nXz5ChF",
-    step_finance: "E3BTSJbQZFtvGp3vJy5sx3RZsX7d6z9Uohgn2nXz5ChF",
-
-    slnd: "7dHbWXmYkH7Hg6k5N9VG2J6pcV8pRixYZqj8ZwLVHZvG",
-    solend: "7dHbWXmYkH7Hg6k5N9VG2J6pcV8pRixYZqj8ZwLVHZvG",
-
-    oxy: "BPFLoader1111111111111111111111111111111111", // placeholder — update if needed
-    oxygen: "BPFLoader1111111111111111111111111111111111",
-
-    kin: "KinXdEcpDQeHPEuQnqmUgtYykqKGVFq6CeVX5iAHJq5",
-    civic: "7dHbWXmYkH7Hg6k5N9VG2J6pcV8pRixYZqj8ZwLVHZvG",
-
-    stsol: "7dHbWXmYkH7Hg6k5N9VG2J6pcV8pRixYZqj8ZwLVHZvG",
-    lido_staked_sol: "7dHbWXmYkH7Hg6k5N9VG2J6pcV8pRixYZqj8ZwLVHZvG",
-
-    usdt: "Es9vMFrzaCERZGKhXoiXZHhJxjXFFqdxMTy7ZR1uPvtX",
-
-    bonk: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-
-    pyusd: "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
-
-    sabre: "4k3Dyjzvzp8eZ6N5m7JxR3S6nLtWPhhqW37bZV8fDm7z",
-    saber: "4k3Dyjzvzp8eZ6N5m7JxR3S6nLtWPhhqW37bZV8fDm7z",
-};
-function resolveTokenMint(input) {
-    if (!input) return null;
-
-    // Normalize: lowercase and remove spaces/underscores/dashes
-    const normalized = input.toLowerCase().replace(/[\s_-]/g, "");
-
-    // Try exact match (case-insensitive keys like 'solana' or 'usdc')
-    if (tokens[normalized]) return tokens[normalized];
-
-    // Try uppercase symbol lookup (like 'SOL', 'USDC')
-    if (tokens[input.toUpperCase()]) return tokens[input.toUpperCase()];
-
-    return null; // Not found
-}
 
 let e_key;
 const app = express();
@@ -145,20 +61,52 @@ bot.onText(/\/start/, (msg) => {
 
 bot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
-    bot.sendMessage(chatId, 'Available commands:\n/start - Start the bot\n/help - Show help');
+    const helpText = `🤖 *Jupiter Daddy Bot Help*
+
+*Traditional Commands:*
+/start - Start the bot
+/connect - Connect your wallet
+/about - Check your balance
+/price <token> - Get token price
+/tokens - List available tokens
+/route <input> <output> <amount> - Get swap route
+/trigger <input> <output> <amount> <price> - Create limit order
+/receivepayment <amount> - Generate payment request
+/payto <wallet> <amount> - Pay to specific wallet
+/notify <token> <above/below> <price> - Set price alerts
+
+*Natural Language Commands (Auto-Execute):*
+• "connect my wallet" → Executes /connect
+• "what's my balance?" → Executes /about
+• "get price of SOL" → Executes /price SOL
+• "get route for 1 SOL to USDC" → Executes /route SOL USDC 1
+• "trigger 1 SOL to USDC at $50" → Executes /trigger SOL USDC 1 50
+• "receive payment of 10 USDC" → Executes /receivepayment 10000000
+• "pay 5 USDC to [wallet]" → Executes /payto [wallet] 5000000
+• "notify me when SOL goes above $100" → Executes /notify SOL above 100
+
+*Examples (All Auto-Execute):*
+• "I want to connect my wallet"
+• "Show me the price of Bitcoin"
+• "Get me a route for 2 SOL to USDC"
+• "Create a trigger order for 1 SOL to USDC at $45"
+• "I need to receive 20 USDC"
+• "Alert me when JUP goes below $0.5"
+
+*Token Names Supported:*
+• SOL, USDC, USDT, WBTC, WETH
+• JUP (Jupiter), BONK, SRM (Serum)
+• And many more! Just type the token name
+
+🚀 *Just type what you want - the bot will automatically execute the commands!*`;
+    
+    bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
 });
 //Phantom Deeplink
-bot.onText(/\/connect/, (msg) => {
+bot.onText(/\/connect/, async (msg) => {
     const chatId = msg.chat.id;
-    const redirectLink = `${server_url}/phantom/callback?chat_id=${chatId}`;
-    const params = new URLSearchParams({
-        dapp_encryption_public_key: dappPublicKey,
-        app_url: 'https://phantom.app',
-        redirect_link: redirectLink,
-        cluster: 'mainnet-beta',
-    });
-
-    const phantomLink = `https://phantom.app/ul/v1/connect?${params.toString()}`;
+    const { generateConnectLink } = await import('./commands/connect.js');
+    const phantomLink = generateConnectLink(chatId, server_url, dappPublicKey);
     bot.sendMessage(chatId, `Click to connect your wallet: [Connect Wallet](${phantomLink})`, {
         parse_mode: 'Markdown'
     });
@@ -203,7 +151,8 @@ console.log(swapRes); // 👈 Do this to inspect structure!
       session: "payment" // optional
     };
 
-    const { nonce, payload: encryptedPayload } = encryptPayload(payload, phantomEncryptionPubKey);
+    const { encryptPayload } = await import('./commands/connect.js');
+    const { nonce, payload: encryptedPayload } = encryptPayload(payload, phantomEncryptionPubKey, dappKeyPair);
 
     const redirect = `${server_url}/phantom/ultra-execute?chat_id=${chatId}&order_id=${swapRes.requestId}`;
     const phantomParams = new URLSearchParams({
@@ -267,7 +216,8 @@ bot.onText(/\/payto (\w{32,44}) (\d+)/, async (msg, match) => {
       session: "payment"
     };
 
-    const { nonce, payload: encryptedPayload } = encryptPayload(payload, phantomEncryptionPubKey);
+    const { encryptPayload } = await import('./commands/connect.js');
+    const { nonce, payload: encryptedPayload } = encryptPayload(payload, phantomEncryptionPubKey, dappKeyPair);
     const redirect = `${server_url}/phantom/ultra-execute?chat_id=${chatId}&order_id=${swapRes.requestId}`;
 
     const phantomParams = new URLSearchParams({
@@ -619,23 +569,28 @@ bot.onText(/\/notify (.+)/, async (msg, match) => {
     const input = match[1].trim().split(" ");
 
     if (input.length !== 3) {
-        return bot.sendMessage(chatId, "❌ Usage: /notify <mint_address> <above|below> <target_price>");
+        return bot.sendMessage(chatId, "❌ Usage: /notify <token_name> <above|below> <target_price>");
     }
 
-    const [mintAddress, condition, targetStr] = input;
+    const [tokenName, condition, targetStr] = input;
     const targetPrice = parseFloat(targetStr);
+    const resolvedMint = resolveTokenMint(tokenName);
+
+    if (!resolvedMint) {
+        return bot.sendMessage(chatId, "❌ Invalid token. Please check the token name or symbol.");
+    }
 
     if (isNaN(targetPrice) || !(condition === "above" || condition === "below")) {
-        return bot.sendMessage(chatId, "⚠️ Invalid input. Use:\n/notify <mint_address> <above|below> <price>");
+        return bot.sendMessage(chatId, "⚠️ Invalid input. Use:\n/notify <token_name> <above|below> <price>");
     }
 
     try {
-        const tokenRes = await fetch(`https://lite-api.jup.ag/tokens/v1/token/${mintAddress}`);
+        const tokenRes = await fetch(`https://lite-api.jup.ag/tokens/v1/token/${resolvedMint}`);
         const tokenInfo = await tokenRes.json();
 
-        const priceRes = await fetch(`https://lite-api.jup.ag/price/v2?ids=${mintAddress}`);
+        const priceRes = await fetch(`https://lite-api.jup.ag/price/v2?ids=${resolvedMint}`);
         const priceJson = await priceRes.json();
-        const currentPrice = parseFloat(priceJson.data[mintAddress]?.price ?? "0");
+        const currentPrice = parseFloat(priceJson.data[resolvedMint]?.price ?? "0");
 
         if (!currentPrice) {
             return bot.sendMessage(chatId, "❌ Couldn't fetch valid token price.");
@@ -652,9 +607,9 @@ bot.onText(/\/notify (.+)/, async (msg, match) => {
 
         const intervalId = setInterval(async () => {
             try {
-                const res = await fetch(`https://lite-api.jup.ag/price/v2?ids=${mintAddress}`);
+                const res = await fetch(`https://lite-api.jup.ag/price/v2?ids=${resolvedMint}`);
                 const json = await res.json();
-                const priceNow = parseFloat(json.data[mintAddress]?.price ?? "0");
+                const priceNow = parseFloat(json.data[resolvedMint]?.price ?? "0");
 
                 console.log(`Current price for ${tokenInfo.symbol}: $${priceNow}`);
 
@@ -677,7 +632,7 @@ bot.onText(/\/notify (.+)/, async (msg, match) => {
         notifyWatchers[chatId].push(intervalId);
     } catch (err) {
         console.error("Notify command error:", err.message);
-        bot.sendMessage(chatId, "⚠️ Failed to fetch token info. Please check the mint address.");
+        bot.sendMessage(chatId, "⚠️ Failed to fetch token info. Please check the token name.");
     }
 });
 
@@ -778,35 +733,11 @@ bot.on('message', async (msg) => {
     // Ignore regular commands like /start
     if (text.startsWith('/')) return;
 
-    const wallet = userWalletMap.get(chatId);
-
     try {
         const intent = await parseIntent(text);
-
-        switch (intent) {
-            case 'connect_wallet':
-                const redirectLink = `${server_url}/phantom/callback?chat_id=${chatId}`;
-                const params = new URLSearchParams({
-                    dapp_encryption_public_key: dappPublicKey,
-                    app_url: 'https://phantom.app',
-                    redirect_link: redirectLink,
-                    cluster: 'mainnet-beta',
-                });
-                const phantomLink = `https://phantom.app/ul/v1/connect?${params.toString()}`;
-                return bot.sendMessage(chatId, `Click to connect your wallet: [Connect Wallet](${phantomLink})`, {
-                    parse_mode: 'Markdown'
-                });
-
-            case 'about_wallet':
-                if (!wallet) return bot.sendMessage(chatId, "❌ You haven't connected your wallet yet. Use /connect first.");
-                const res = await axios.get(`https://lite-api.jup.ag/ultra/v1/balances/${wallet}`);
-                const sol = res.data?.SOL?.uiAmount ?? 0;
-                const frozen = res.data?.SOL?.isFrozen ? 'Yes' : 'No';
-                return bot.sendMessage(chatId, `💰 Your SOL Balance:\nBalance: ${sol} SOL\nFrozen: ${frozen}`);
-
-            default:
-                return bot.sendMessage(chatId, `🤔 Sorry, I didn’t understand that.\nTry saying “connect my wallet” or “what’s in my wallet?”`);
-        }
+        
+        // Use the new command handler for all NLP-based commands
+        await handleNLPCommand(bot, msg, intent, userWalletMap, userSessionMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair, toLamports, notifyWatchers);
     } catch (err) {
         console.error('NLP parse failed:', err);
         bot.sendMessage(chatId, "⚠️ NLP parsing failed. Try again.");
