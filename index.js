@@ -14,7 +14,18 @@ import { PublicKey } from "@solana/web3.js";
 import { parseIntent } from './nlp.js';
 import { handleNLPCommand } from './handlers/commandHandler.js';
 import { resolveTokenMint } from './utils/tokens.js';
-const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // Your preferred token payment
+import { 
+    connectToDatabase, 
+    saveWalletConnection, 
+    saveRouteHistory, 
+    saveTriggerHistory, 
+    savePaymentHistory, 
+    savePriceCheckHistory, 
+    saveNotificationHistory, 
+    getHistory, 
+    updateLastActivity,
+    closeDatabase 
+} from './utils/database.js';
 // const qr = require('qr-image');
 import qr from "qr-image"
 
@@ -34,6 +45,9 @@ const userPhantomPubkeyMap = new Map(); // chat_id → Phantom's public key
 const notifyWatchers = {}; // To track active notify sessions per chat
 const LAMPORTS_PER_SOL = 1_000_000_000;
 bot.on('polling_error', console.error);
+
+// Connect to database on startup
+connectToDatabase().catch(console.error);
 
 async function toLamports({ sol = null, usd = null } = {}) {
     if (sol !== null) {
@@ -74,6 +88,7 @@ bot.onText(/\/help/, (msg) => {
 /receivepayment <amount> - Generate payment request
 /payto <wallet> <amount> - Pay to specific wallet
 /notify <token> <above/below> <price> - Set price alerts
+/history [type] - Show your activity history
 
 *Natural Language Commands (Auto-Execute):*
 • "connect my wallet" → Executes /connect
@@ -98,6 +113,14 @@ bot.onText(/\/help/, (msg) => {
 • JUP (Jupiter), BONK, SRM (Serum)
 • And many more! Just type the token name
 
+*History Types:*
+• /history - All activities
+• /history route - Route queries
+• /history trigger - Trigger orders
+• /history payment - Payment history
+• /history price - Price checks
+• /history notification - Notifications
+
 🚀 *Just type what you want - the bot will automatically execute the commands!*`;
     
     bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
@@ -113,6 +136,7 @@ bot.onText(/\/connect/, async (msg) => {
 });
 bot.onText(/\/receivepayment (\d+)/, async (msg, match) => {
   const chatId = String(msg.chat.id);
+  const username = msg.from.username || null;
   const merchantWallet = userWalletMap.get(chatId);
   const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
   const amount = Number(match[1]); // in micro USDC (e.g. 1 USDC = 1_000_000)
@@ -166,6 +190,9 @@ console.log(swapRes); // 👈 Do this to inspect structure!
     console.log(phantomLink)
     const qrData = qr.imageSync(phantomLink, { type: 'png' });
 
+    // Save payment history
+    await savePaymentHistory(chatId, amount, 'receive', null, username);
+
     await bot.sendPhoto(chatId, qrData, {
       caption: `🧾 Payment request: Pay ${amount / 1e6} USDC\n[Click here to pay with SOL](${phantomLink})`,
       parse_mode: "Markdown"
@@ -179,6 +206,7 @@ console.log(swapRes); // 👈 Do this to inspect structure!
 
 bot.onText(/\/payto (\w{32,44}) (\d+)/, async (msg, match) => {
   const chatId = String(msg.chat.id);
+  const username = msg.from.username || null;
   const payerWallet = userWalletMap.get(chatId);
   const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
   const merchantWallet = match[1];
@@ -229,6 +257,9 @@ bot.onText(/\/payto (\w{32,44}) (\d+)/, async (msg, match) => {
 
     const phantomLink = `https://phantom.app/ul/v1/signTransaction?${phantomParams.toString()}`;
 
+    // Save payment history
+    await savePaymentHistory(chatId, amount, 'send', merchantWallet, username);
+
     await bot.sendMessage(chatId, `💸 [Click here to pay ${amount / 1e6} USDC to merchant](${phantomLink})`, {
       parse_mode: "Markdown"
     });
@@ -267,8 +298,10 @@ bot.onText(/\/about/, async (msg) => {
 //PRICE API
 bot.onText(/\/price (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
+    const username = msg.from.username || null;
     const mintAddress = match[1].trim();
     const resolvedMint = resolveTokenMint(mintAddress);
+    
     try {
         const tokenRes = await fetch(`https://lite-api.jup.ag/tokens/v1/token/${resolvedMint}`);
         const tokenInfo = await tokenRes.json();
@@ -283,6 +316,9 @@ bot.onText(/\/price (.+)/, async (msg, match) => {
         }
 
         const msgText = `💰 *${tokenInfo.name}* (${tokenInfo.symbol})\n\n📈 Price: $${price.toFixed(6)}`;
+
+        // Save price check history
+        await savePriceCheckHistory(chatId, mintAddress, price, username);
 
         await bot.sendPhoto(chatId, tokenInfo.logoURI, {
             caption: msgText,
@@ -319,6 +355,7 @@ bot.onText(/\/tokens/, async (msg) => {
 //TRIGGER API
 bot.onText(/\/trigger (.+)/, async (msg, match) => {
     const chatId = String(msg.chat.id);
+    const username = msg.from.username || null;
     const wallet = userWalletMap.get(chatId);
     const session = userSessionMap.get(chatId);
 
@@ -364,9 +401,9 @@ bot.onText(/\/trigger (.+)/, async (msg, match) => {
     }
 
     const [inputMintName, outputMintName, amountStr, targetPriceStr] = args;
-const inputMint = resolveTokenMint(inputMintName);
-const outputMint = resolveTokenMint(outputMintName);
-console.log(inputMint,outputMint)
+    const inputMint = resolveTokenMint(inputMintName);
+    const outputMint = resolveTokenMint(outputMintName);
+    console.log(inputMint,outputMint)
     const amount = parseFloat(amountStr);
     const targetPrice = parseFloat(targetPriceStr);
 
@@ -429,6 +466,9 @@ console.log(inputMint,outputMint)
             return bot.sendMessage(chatId, "⚠️ Failed to create order.");
         }
 
+        // Save trigger history
+        await saveTriggerHistory(chatId, inputMint, outputMint, amount, targetPrice, orderId, username);
+
         // 2. Generate Phantom signing link
         const redirectLink = `${server_url}/phantom/execute?chat_id=${chatId}&order_id=${orderId}`;
         const phantomParams = new URLSearchParams({
@@ -454,6 +494,7 @@ console.log(inputMint,outputMint)
 //ULTRA API 
 bot.onText(/\/route (.+)/, async (msg, match) => {
     const chatId = String(msg.chat.id);
+    const username = msg.from.username || null;
     const wallet = userWalletMap.get(chatId);
     const session = userSessionMap.get(chatId);
     const phantomEncryptionPubKey = userPhantomPubkeyMap.get(chatId);
@@ -521,6 +562,9 @@ ${retried ? "⚠️ *Insufficient balance. Preview only.*" : ""}
 • 💰 Fee: ${fee} ${s.feeMint.slice(0, 4)}...`;
     });
 
+    // Save route history
+    await saveRouteHistory(chatId, inputMint, outputMint, amount, routeDetails, username);
+
     if (retried || !transaction) {
         return bot.sendMessage(chatId, routeDetails, { parse_mode: "Markdown" });
     }
@@ -566,6 +610,7 @@ ${retried ? "⚠️ *Insufficient balance. Preview only.*" : ""}
 //custom to send notifications based on price conditions
 bot.onText(/\/notify (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
+    const username = msg.from.username || null;
     const input = match[1].trim().split(" ");
 
     if (input.length !== 3) {
@@ -595,6 +640,9 @@ bot.onText(/\/notify (.+)/, async (msg, match) => {
         if (!currentPrice) {
             return bot.sendMessage(chatId, "❌ Couldn't fetch valid token price.");
         }
+
+        // Save notification history
+        await saveNotificationHistory(chatId, resolvedMint, condition, targetPrice, username);
 
         await bot.sendMessage(chatId,
             `📊 *${tokenInfo.name}* (${tokenInfo.symbol})\n` +
@@ -749,8 +797,6 @@ app.get('/', (req, res) => {
 });
 // Phantom callback endpoint to handle wallet connection
 app.get('/phantom/callback', async (req, res) => {
-
-
     const { phantom_encryption_public_key, nonce, data, chat_id } = req.query;
 
     if (!phantom_encryption_public_key || !nonce || !data || !chat_id) {
@@ -777,6 +823,15 @@ app.get('/phantom/callback', async (req, res) => {
         userWalletMap.set(String(chat_id), wallet);
         userSessionMap.set(String(chat_id), sessionId);
         userPhantomPubkeyMap.set(String(chat_id), phantom_encryption_public_key);
+
+        // Save wallet connection to database
+        await saveWalletConnection(
+            chat_id, 
+            wallet, 
+            null, // username will be set when user sends a message
+            sessionId, 
+            phantom_encryption_public_key
+        );
 
         bot.sendMessage(chat_id, `✅ Wallet connected: \n${wallet}`);
 
@@ -904,6 +959,94 @@ const signedTxBase64 = Buffer.from(bs58.decode(signedTxBase58)).toString("base64
     }
 });
 
+// History command
+bot.onText(/\/history(.*)/, async (msg, match) => {
+    const chatId = String(msg.chat.id);
+    const username = msg.from.username || null;
+    const type = match[1].trim() || 'all';
+    
+    try {
+        const history = await getHistory(chatId, type, 10);
+        
+        if (history.length === 0) {
+            return bot.sendMessage(chatId, `📭 No ${type === 'all' ? '' : type + ' '}history found.`);
+        }
+
+        let historyText = `🔢 *Your ${type === 'all' ? 'Recent Activity' : type + ' History'}*\n\n`;
+        
+        history.forEach((item, index) => {
+            const date = new Date(item.timestamp).toLocaleString();
+            const typeIcon = {
+                'route': '🔀',
+                'trigger': '⚡',
+                'payment': '💸',
+                'price': '💰',
+                'notification': '🔔'
+            }[item.type] || '📝';
+
+            switch (item.type) {
+                case 'route':
+                    historyText += `${typeIcon} *Route Query* (${date})\n`;
+                    historyText += `   ${item.inputMint?.slice(0, 4)}... → ${item.outputMint?.slice(0, 4)}...\n`;
+                    historyText += `   Amount: ${item.amount}\n\n`;
+                    break;
+                    
+                case 'trigger':
+                    historyText += `${typeIcon} *Trigger Order* (${date})\n`;
+                    historyText += `   ${item.inputMint?.slice(0, 4)}... → ${item.outputMint?.slice(0, 4)}...\n`;
+                    historyText += `   Amount: ${item.amount} | Target: $${item.targetPrice}\n`;
+                    historyText += `   Status: ${item.status} | Order: ${item.orderId?.slice(0, 8)}...\n\n`;
+                    break;
+                    
+                case 'payment':
+                    historyText += `${typeIcon} *Payment* (${date})\n`;
+                    historyText += `   Type: ${item.type === 'receive' ? 'Received' : 'Sent'}\n`;
+                    historyText += `   Amount: ${item.amount / 1e6} USDC\n`;
+                    if (item.walletAddress) {
+                        historyText += `   Wallet: ${item.walletAddress.slice(0, 8)}...\n`;
+                    }
+                    historyText += '\n';
+                    break;
+                    
+                case 'price':
+                    historyText += `${typeIcon} *Price Check* (${date})\n`;
+                    historyText += `   Token: ${item.token?.slice(0, 4)}...\n`;
+                    historyText += `   Price: $${item.price}\n\n`;
+                    break;
+                    
+                case 'notification':
+                    historyText += `${typeIcon} *Notification* (${date})\n`;
+                    historyText += `   Token: ${item.token?.slice(0, 4)}...\n`;
+                    historyText += `   Condition: ${item.condition} $${item.targetPrice}\n`;
+                    historyText += `   Status: ${item.status}\n\n`;
+                    break;
+                    
+                default:
+                    historyText += `${typeIcon} *Activity* (${date})\n\n`;
+            }
+        });
+
+        bot.sendMessage(chatId, historyText, { parse_mode: 'Markdown' });
+        
+    } catch (error) {
+        console.error('History command error:', error);
+        bot.sendMessage(chatId, '❌ Failed to fetch history. Please try again.');
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    await closeDatabase();
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    await closeDatabase();
+    process.exit(0);
 });

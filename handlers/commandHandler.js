@@ -9,6 +9,14 @@ import {
     parsePaymentIntent, 
     parseNotificationIntent 
 } from '../nlp.js';
+import { 
+    savePriceCheckHistory, 
+    saveRouteHistory, 
+    saveTriggerHistory, 
+    savePaymentHistory, 
+    saveNotificationHistory,
+    updateLastActivity 
+} from '../utils/database.js';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import axios from 'axios';
@@ -16,6 +24,10 @@ import axios from 'axios';
 export async function handleNLPCommand(bot, msg, intent, userWalletMap, userSessionMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair, toLamports, notifyWatchers) {
     const chatId = String(msg.chat.id);
     const text = msg.text;
+    const username = msg.from.username || null;
+
+    // Update last activity
+    await updateLastActivity(chatId);
 
     try {
         switch (intent) {
@@ -46,6 +58,10 @@ export async function handleNLPCommand(bot, msg, intent, userWalletMap, userSess
                 const priceResult = await getTokenPrice(tokenSymbol);
                 if (priceResult.success) {
                     const msgText = `💰 *${priceResult.token.name}* (${priceResult.token.symbol})\n\n📈 Price: $${priceResult.price.toFixed(6)}`;
+                    
+                    // Save price check history
+                    await savePriceCheckHistory(chatId, tokenSymbol, priceResult.price, username);
+                    
                     return bot.sendPhoto(chatId, priceResult.token.logoURI, {
                         caption: msgText,
                         parse_mode: "Markdown"
@@ -66,7 +82,12 @@ export async function handleNLPCommand(bot, msg, intent, userWalletMap, userSess
                 const amountInLamports = await toLamports({ sol: routeParams.amount });
                 
                 // Call the route command logic
-                return await executeRouteCommand(bot, chatId, inputMint, outputMint, amountInLamports.toString(), userWalletMap, userSessionMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair);
+                const routeResult = await executeRouteCommand(bot, chatId, inputMint, outputMint, amountInLamports.toString(), userWalletMap, userSessionMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair);
+                
+                // Save route history
+                await saveRouteHistory(chatId, inputMint, outputMint, routeParams.amount, "Route query executed", username);
+                
+                return routeResult;
 
             case 'trigger_swap':
                 const triggerParams = await parseTriggerIntent(text);
@@ -81,7 +102,16 @@ export async function handleNLPCommand(bot, msg, intent, userWalletMap, userSess
                 const targetPrice = triggerParams.targetPrice;
                 
                 // Call the trigger command logic
-                return await executeTriggerCommand(bot, chatId, triggerInputMint, triggerOutputMint, triggerAmount, targetPrice, userWalletMap, userSessionMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair, toLamports);
+                const triggerResult = await executeTriggerCommand(bot, chatId, triggerInputMint, triggerOutputMint, triggerAmount, targetPrice, userWalletMap, userSessionMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair, toLamports);
+                
+                // Save trigger history (we'll need to extract orderId from the result)
+                if (triggerResult && triggerResult.includes('Order ID:')) {
+                    const orderIdMatch = triggerResult.match(/Order ID: `([^`]+)`/);
+                    const orderId = orderIdMatch ? orderIdMatch[1] : null;
+                    await saveTriggerHistory(chatId, triggerInputMint, triggerOutputMint, triggerAmount, targetPrice, orderId, username);
+                }
+                
+                return triggerResult;
 
             case 'receive_payment':
                 const paymentParams = await parsePaymentIntent(text);
@@ -91,7 +121,12 @@ export async function handleNLPCommand(bot, msg, intent, userWalletMap, userSess
                 
                 // Execute the receivepayment command
                 const paymentAmount = paymentParams.amount * 1000000; // Convert to micro USDC
-                return await executeReceivePaymentCommand(bot, chatId, paymentAmount, userWalletMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair);
+                const receiveResult = await executeReceivePaymentCommand(bot, chatId, paymentAmount, userWalletMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair);
+                
+                // Save payment history
+                await savePaymentHistory(chatId, paymentAmount, 'receive', null, username);
+                
+                return receiveResult;
 
             case 'pay_to':
                 const payParams = await parsePaymentIntent(text);
@@ -101,7 +136,12 @@ export async function handleNLPCommand(bot, msg, intent, userWalletMap, userSess
                 
                 // Execute the payto command
                 const payAmount = payParams.amount * 1000000; // Convert to micro USDC
-                return await executePayToCommand(bot, chatId, payParams.wallet, payAmount, userWalletMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair);
+                const payResult = await executePayToCommand(bot, chatId, payParams.wallet, payAmount, userWalletMap, userPhantomPubkeyMap, server_url, dappPublicKey, dappKeyPair);
+                
+                // Save payment history
+                await savePaymentHistory(chatId, payAmount, 'send', payParams.wallet, username);
+                
+                return payResult;
 
             case 'get_tokens':
                 // Execute the tokens command
@@ -115,7 +155,12 @@ export async function handleNLPCommand(bot, msg, intent, userWalletMap, userSess
                 
                 // Execute the notify command
                 const notificationToken = resolveTokenMint(notificationParams.token);
-                return await executeNotifyCommand(bot, chatId, notificationToken, notificationParams.condition, notificationParams.price, notifyWatchers);
+                const notifyResult = await executeNotifyCommand(bot, chatId, notificationToken, notificationParams.condition, notificationParams.price, notifyWatchers);
+                
+                // Save notification history
+                await saveNotificationHistory(chatId, notificationToken, notificationParams.condition, notificationParams.price, username);
+                
+                return notifyResult;
 
             default:
                 return bot.sendMessage(chatId, `🤔 Sorry, I didn't understand that.\n\nTry saying:\n• "connect my wallet"\n• "what's my balance?"\n• "get price of SOL"\n• "get route for 1 SOL to USDC"\n• "trigger 1 SOL to USDC at $50"`);
