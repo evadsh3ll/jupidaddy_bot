@@ -1034,6 +1034,9 @@ bot.onText(/\/history(.*)/, async (msg, match) => {
     }
 });
 
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
@@ -1050,3 +1053,4 @@ process.on('SIGTERM', async () => {
     await closeDatabase();
     process.exit(0);
 });
+
